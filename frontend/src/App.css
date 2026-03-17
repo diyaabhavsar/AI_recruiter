@@ -1,0 +1,20 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;700;800&display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #f8fafc; font-family: 'Inter', sans-serif; color: #1e293b; }
+
+@keyframes orbPulse { 0%{transform:scale(1);opacity:.5} 100%{transform:scale(1.4);opacity:0} }
+@keyframes fadeUp   { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+@keyframes spin     { to{transform:rotate(360deg)} }
+@keyframes breathe  { 0%,100%{opacity:.6} 50%{opacity:1} }
+
+::-webkit-scrollbar { width: 5px; } 
+::-webkit-scrollbar-track { background: #f1f5f9; } 
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+button:hover { filter: brightness(1.05); transform: translateY(-1px); } 
+button { transition: all .2s; }
+
+textarea:focus, input:focus { border-color: #6366f1 !important; outline: none; box-shadow: 0 0 0 3px rgba(99,102,241,0.1); }
+textarea { transition: border-color .2s; }
+
