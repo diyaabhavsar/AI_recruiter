@@ -3,6 +3,7 @@ import { RetellWebClient } from "retell-client-js-sdk";
 
 import { AGENT_ID, STAGE } from "../constants/index.js";
 import useCheatingMonitor from "../hooks/useCheatingMonitor.js";
+import useTTSGreeting from "../hooks/useTTSGreeting.js";
 import {
     generateEvaluation,
     createWebCall,
@@ -30,10 +31,22 @@ export default function CandidateInterview({ sessionId }) {
     const [starting, setStarting] = useState(false);
     const [startError, setStartError] = useState(null);
     const [questionCount, setQuestionCount] = useState(0);
-    const [liveScores, setLiveScores] = useState([]); // Added for real-time coaching
-    const [coaching, setCoaching] = useState(null); // Added for real-time coaching
+    const [liveScores, setLiveScores] = useState([]);
+    const [coaching, setCoaching] = useState(null);
+    const [callStarted, setCallStarted] = useState(false);
+    // ttsPhase = true while browser TTS Phase-1 greeting is playing
+    const [ttsPhase, setTtsPhase] = useState(false);
 
     const monitor = useCheatingMonitor(stage === STAGE.INTERVIEW, callId);
+
+    // ── Phase-1 TTS ──────────────────────────────────────────────────────────
+    // Fires immediately when Retell call connects — browser speaks first
+    // so there's no awkward silence waiting for the candidate.
+    // Once TTS finishes, setTtsPhase(false) signals Phase-2 (Retell) can take over.
+    const { isTtsSpeaking } = useTTSGreeting(
+        callStarted,
+        () => setTtsPhase(false),
+    );
 
     // ── Refs to avoid stale closures ────────────────────────────────────────
     const callIdRef = useRef(callId);
@@ -75,15 +88,24 @@ export default function CandidateInterview({ sessionId }) {
 
     // ── Wire up Retell events (once) ────────────────────────────────────────
     useEffect(() => {
-        retellClient.on("call_started", () => { setIsCallActive(true); setAgentTalking(false); });
+        retellClient.on("call_started", () => {
+            setIsCallActive(true);
+            setAgentTalking(false);
+            // Start Phase-1 browser TTS greeting immediately
+            setTtsPhase(true);
+            setCallStarted(true);
+        });
         retellClient.on("call_ended", () => { setIsCallActive(false); handleCallEnded(); });
-        retellClient.on("agent_start_talking", () => setAgentTalking(true));
+        // Suppress Retell talking events during Phase-1 TTS so the orb stays correct
+        retellClient.on("agent_start_talking", () => { if (!isTtsSpeaking) setAgentTalking(true); });
         retellClient.on("agent_stop_talking", () => setAgentTalking(false));
         retellClient.on("update", (update) => {
             if (update?.transcript) {
                 setTranscript([...update.transcript]);
+                // Phase-2 questions only — Retell transcript won't include TTS turns,
+                // so every agent turn here IS a real interview question.
                 const agentTurns = update.transcript.filter(u => u.role === "agent").length;
-                setQuestionCount(agentTurns);
+                setQuestionCount(Math.max(0, agentTurns));
             }
         });
         retellClient.on("error", (err) => {
@@ -114,28 +136,31 @@ export default function CandidateInterview({ sessionId }) {
         setStarting(true);
         setStartError(null);
 
-        // Step 1: Camera permission
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+        // Step 1: Camera permission (Compulsory)
         let camStream;
         try {
             camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
             monitor.setCamStreamDirect(camStream);
-        } catch {
-            setStartError("📹 Camera permission is required. Please allow camera access and try again.");
+        } catch (e) {
+            setStartError("📹 Camera access is COMPULSORY for this interview. Please grant camera permission and try again.");
             setStarting(false);
             return;
         }
 
-        // Step 2: Screen share permission
+        // Step 2: Screen share permission (Compulsory on Desktop only)
         let screenStream;
-        try {
-            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-            monitor.setScreenStreamDirect(screenStream);
-        } catch {
-            camStream.getTracks().forEach(t => t.stop());
-            monitor.stopAll();
-            setStartError("🖥️ Screen sharing is required. Please share your screen and try again.");
-            setStarting(false);
-            return;
+        if (!isMobile) {
+            try {
+                screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+                monitor.setScreenStreamDirect(screenStream);
+            } catch (e) {
+                if (camStream) camStream.getTracks().forEach(t => t.stop());
+                setStartError("🖥️ Screen sharing is COMPULSORY for laptop users. Please share your screen and try again.");
+                setStarting(false);
+                return;
+            }
         }
 
         // Step 3: Create the web call (backend fetches resume/JD from the session)
@@ -154,20 +179,20 @@ export default function CandidateInterview({ sessionId }) {
             // Step 4: Start Retell call (requests microphone permission)
             try {
                 await retellClient.startCall({ accessToken: access_token, sampleRate: 24000 });
-            } catch {
-                camStream.getTracks().forEach(t => t.stop());
-                screenStream.getTracks().forEach(t => t.stop());
+            } catch (err) {
+                if (camStream) camStream.getTracks().forEach(t => t.stop());
+                if (screenStream) screenStream.getTracks().forEach(t => t.stop());
                 monitor.stopAll();
-                setStartError("🎙️ Microphone permission is required. Please allow microphone access and try again.");
+                setStartError("🎙️ Microphone access is COMPULSORY for the voice interview. Please allow access and try again.");
                 setStarting(false);
                 return;
             }
 
             setStage(STAGE.INTERVIEW);
         } catch (err) {
-            setStartError(err.message);
-            camStream.getTracks().forEach(t => t.stop());
-            screenStream.getTracks().forEach(t => t.stop());
+            setStartError("Failed to initiate interview session: " + err.message);
+            if (camStream) camStream.getTracks().forEach(t => t.stop());
+            if (screenStream) screenStream.getTracks().forEach(t => t.stop());
             monitor.stopAll();
         } finally {
             setStarting(false);
@@ -233,7 +258,7 @@ export default function CandidateInterview({ sessionId }) {
 
             // Save the result back to the backend
             try {
-                await saveInterviewResult(sessionId, fullEval, candidateAnswers);
+                await saveInterviewResult(sessionId, fullEval, candidateAnswers, finalTranscript);
                 console.log("✅ Interview result saved to backend");
             } catch (e) {
                 console.warn("Failed to save result:", e);
@@ -297,21 +322,29 @@ export default function CandidateInterview({ sessionId }) {
             <div style={{ textAlign: "center", maxWidth: 500, padding: "0 20px", animation: "fadeUp .5s ease" }}>
                 <div style={{ fontSize: 56, marginBottom: 20 }}>🎙️</div>
                 <h1 style={{ fontFamily: "'Outfit', sans-serif", fontSize: 36, fontWeight: 800, marginBottom: 12, letterSpacing: "-0.02em", color: "#0f172a" }}>
-                    AI Voice <span style={{ color: "#6366f1" }}>Interview</span>
+                    mQuali<span style={{ color: "#6366f1" }}>Fire</span>
                 </h1>
                 <p style={{ color: "#475569", fontSize: 15, lineHeight: 1.7, marginBottom: 8 }}>
                     Hello <strong style={{ color: "#4f46e5" }}>{session.interviewerName}</strong>
                 </p>
-                <p style={{ color: "#64748b", fontSize: 14, lineHeight: 1.6, marginBottom: 32 }}>
+                <p style={{ color: "#64748b", fontSize: 14, lineHeight: 1.6, marginBottom: 24 }}>
                     This is a voice-based interview with an AI interviewer. You'll need to grant<br />
                     camera, screen sharing, and microphone permissions to proceed.
                 </p>
 
+                <div style={{ background: "#e0e7ff", border: "1px solid #c7d2fe", borderRadius: 8, padding: "12px 16px", marginBottom: 32, fontSize: 13, color: "#4338ca", textAlign: "left", fontWeight: 500, lineHeight: 1.6 }}>
+                    <span style={{ fontWeight: 700 }}>ℹ️ Please Note:</span> This is an AI-powered system attempting to simulate a real human conversation. We strongly recommend using <strong>earphones or headphones</strong> for the best audio experience and to prevent microphone feedback.
+                </div>
+
                 <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "center", marginBottom: 32 }}>
-                    {["📹 Camera access", "🖥️ Screen sharing", "🎙️ Microphone access"].map(p => (
+                    {[
+                        "📹 Camera access", 
+                        !/iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? "🖥️ Screen sharing (compulsory)" : null, 
+                        "🎙️ Microphone access"
+                    ].filter(Boolean).map(p => (
                         <div key={p} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "#64748b", fontWeight: 500 }}>
                             <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#cbd5e1" }} />
-                            {p} required
+                            {p}
                         </div>
                     ))}
                 </div>
@@ -355,13 +388,13 @@ export default function CandidateInterview({ sessionId }) {
                 <div style={{ height: "100%", background: "linear-gradient(90deg, #6366f1, #8b5cf6)", width: `${(questionCount / MAX_Q) * 100}%`, transition: "width .5s" }} />
             </div>
 
-            <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+            <div style={{ display: "flex", flex: 1, overflow: "hidden", flexDirection: window.innerWidth < 768 ? "column" : "row" }}>
                 {/* Centre: Orb + transcript */}
-                <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "32px 24px 20px", borderBottom: "1px solid #e2e8f0", background: "#ffffff" }}>
-                        <VoiceOrb talking={agentTalking} listening={isCallActive && !agentTalking} />
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "32px 24px 20px", borderBottom: "1px solid #e2e8f0", background: "#ffffff", flexShrink: 0 }}>
+                        <VoiceOrb talking={ttsPhase || agentTalking} listening={isCallActive && !ttsPhase && !agentTalking} />
                         <div style={{ marginTop: 24, fontSize: 13, color: "#64748b", letterSpacing: "0.1em", fontWeight: 600 }}>
-                            {agentTalking ? "ALEX IS SPEAKING..." : isCallActive ? "LISTENING..." : "CONNECTING..."}
+                            {(ttsPhase || agentTalking) ? "ALEX IS SPEAKING..." : isCallActive ? "LISTENING..." : "CONNECTING..."}
                         </div>
                     </div>
                     <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px", background: "#f8fafc" }}>
@@ -369,8 +402,19 @@ export default function CandidateInterview({ sessionId }) {
                     </div>
                 </div>
 
-                {/* Right sidebar: proctoring */}
-                <div style={{ width: 260, borderLeft: "1px solid #e2e8f0", overflowY: "auto", background: "#ffffff", padding: 20, display: "flex", flexDirection: "column", gap: 24, boxShadow: "-4px 0 15px rgba(0,0,0,0.02)" }}>
+                {/* Right sidebar: proctoring (Only if on Desktop or has content) */}
+                <div style={{ 
+                    width: window.innerWidth < 768 ? "100%" : 260, 
+                    borderLeft: window.innerWidth < 768 ? "none" : "1px solid #e2e8f0", 
+                    borderTop: window.innerWidth < 768 ? "1px solid #e2e8f0" : "none",
+                    overflowY: "auto", 
+                    background: "#ffffff", 
+                    padding: 20, 
+                    display: (window.innerWidth < 768 && !monitor.camStream) ? "none" : "flex", 
+                    flexDirection: "column", 
+                    gap: 24, 
+                    boxShadow: "-4px 0 15px rgba(0,0,0,0.02)" 
+                }}>
                     <div>
                         <label style={S.label}>📹 Camera</label>
                         {monitor.camStream

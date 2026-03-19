@@ -12,7 +12,7 @@ export default function LiveTranscriptBubble({ transcript }) {
 
     return (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {transcript.slice(-6).map((u, i) => (
+            {transcript.map((u, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: u.role === "agent" ? "flex-start" : "flex-end" }}>
                     <div style={{
                         maxWidth: "80%",

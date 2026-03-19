@@ -1,10 +1,41 @@
 import express from "express";
 import { retell, groq } from "../services/clients.js";
-import callSessions, { interviewSessions } from "../store.js";
+import callSessions, { interviewSessions, saveToDisk } from "../store.js";
 import Retell from "retell-sdk";
 import Groq from "groq-sdk";
+import { getInterviewHistory, interviewHistory } from "../store.js";
 
 const router = express.Router();
+
+// GET /interview-history — returns all completed interviews
+router.get("/interview-history", (req, res) => {
+    const history = getInterviewHistory();
+    res.json({
+        total: history.length,
+        interviews: history.map(h => ({
+            archiveKey: h.archiveKey,
+            callId: h.callId,
+            candidateName: h.candidateName,
+            role: h.role,
+            startedAt: h.startedAt,
+            completedAt: h.completedAt,
+            questionsAsked: h.questionsAsked,
+            overallScore: h.overallScore,
+            answersCount: h.answerScores?.length ?? 0,
+            status: h.status,
+        })),
+    });
+});
+
+// GET /interview-history/:archiveKey — full details including transcript
+router.get("/interview-history/:archiveKey", (req, res) => {
+    const record = interviewHistory.get(req.params.archiveKey);
+    if (!record) return res.status(404).json({ error: "Interview not found" });
+    res.json(record);
+});
+
+
+
 
 // ── Helper: generate a unique session ID ────────────────────────────────────
 function generateSessionId() {
@@ -38,6 +69,7 @@ router.post("/create-interview", (req, res) => {
         });
 
         console.log(`📋 Interview session created: ${sessionId} by ${interviewerName}`);
+        saveToDisk(); // Persist newly created session
         res.json({ sessionId });
     } catch (err) {
         console.error("create-interview error:", err);
@@ -70,6 +102,7 @@ router.get("/interviews", (req, res) => {
             status: s.status,
             candidateAnswers: s.candidateAnswers,
             evaluation: s.evaluation,
+            transcript: s.transcript || [],
         }));
     res.json(interviews);
 });
@@ -81,9 +114,11 @@ router.post("/interview/:sessionId/result", (req, res) => {
 
     session.evaluation = req.body.evaluation;
     session.candidateAnswers = req.body.candidateAnswers ?? 0;
+    session.transcript = req.body.transcript ?? [];
     session.status = "completed";
 
-    console.log(`✅ Evaluation saved for session ${session.sessionId} | Score: ${session.evaluation?.overallScore ?? "N/A"}`);
+    console.log(`✅ Evaluation saved for session ${session.sessionId} | Score: ${session.evaluation?.overallScore ?? "N/A"} | Transcript: ${session.transcript.length} lines`);
+    saveToDisk(); // Persist the final score and transcript
     res.json({ ok: true });
 });
 
@@ -127,6 +162,7 @@ router.post("/create-web-call", async (req, res) => {
                 jobDescription: jobDescription.slice(0, 1000),
                 groqKey: groqKey || "",
                 anthropicKey: anthropicKey || "",
+                sessionId: sessionId || "",
             },
         });
 
@@ -139,6 +175,7 @@ router.post("/create-web-call", async (req, res) => {
             anthropicKey: anthropicKey || "",
             transcript: [],
             difficulty: 2,
+            flowStage: 0,
             questionsAsked: 0,
             maxQuestions: 12,
             answerScores: [],
@@ -167,6 +204,24 @@ router.post("/create-web-call", async (req, res) => {
     }
 });
 
+// ── REST: clear agent begin_message (run once after setup) ─────────────────────
+// The Retell agent was created with a begin_message that plays before our
+// WebSocket is ready.  This endpoint clears it so our WebSocket controls
+// the greeting entirely.
+router.post("/clear-agent-greeting", async (req, res) => {
+    try {
+        const agentId = req.body.agentId || process.env.RETELL_AGENT_ID;
+        if (!agentId) return res.status(400).json({ error: "agentId required (or set RETELL_AGENT_ID env var)" });
+
+        await retell.agent.update(agentId, { begin_message: "" });
+        console.log(`✅ Agent ${agentId} begin_message cleared`);
+        res.json({ ok: true, message: "Agent begin_message cleared — WebSocket now controls the greeting" });
+    } catch (err) {
+        console.error("clear-agent-greeting error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ── REST: one-time agent setup ──────────────────────────────────────────────────
 router.get("/setup-agent", async (req, res) => {
     try {
@@ -185,6 +240,8 @@ router.get("/setup-agent", async (req, res) => {
             },
             voice_id: "11labs-Cimo",
             agent_name: "Alex - AI Interviewer",
+            // No begin_message — frontend Web Speech API plays the greeting immediately
+            // so Alex speaks the instant the call connects, before the candidate says anything
             ambient_sound: "call-center",
             boosted_keywords: ["experience", "project", "challenges", "architecture", "design"],
             interruption_sensitivity: 0.8,

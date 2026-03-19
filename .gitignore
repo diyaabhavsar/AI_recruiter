@@ -44,3 +44,9 @@ Thumbs.db
 *.swp
 *.swo
 .viminfo
+
+# App Runtime & Tests
+backend/db.json
+test_*.js
+backend/test_*.js
+*.txt

@@ -76,11 +76,11 @@ export async function listInterviews() {
 }
 
 // ── Save evaluation result back to session ──────────────────────────────────
-export async function saveInterviewResult(sessionId, evaluation, candidateAnswers) {
+export async function saveInterviewResult(sessionId, evaluation, candidateAnswers, transcript) {
     const res = await fetch(`${API_BASE}/interview/${sessionId}/result`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ evaluation, candidateAnswers }),
+        body: JSON.stringify({ evaluation, candidateAnswers, transcript }),
     });
     if (!res.ok) throw new Error("Failed to save result");
     return await res.json();
